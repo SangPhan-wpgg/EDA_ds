@@ -128,6 +128,15 @@ Dự án tổ chức dữ liệu thành ba lớp theo chuẩn data engineering:
 raw (.dta gốc)  →  interim (parquet trung gian)  →  processed (sẵn sàng phân tích)
 ```
 
+Kiến trúc nhiều lớp này không phải để cho "đẹp", mà giải quyết **ba vấn đề rất cụ thể của
+chính bộ dữ liệu YP2021**. Hiểu được ba động lực này thì mọi bước xử lý phía sau đều có lý do:
+
+| Động lực thiết kế | Vấn đề thực tế của YP2021 | Lớp giải quyết |
+|---|---|---|
+| **Trung thực với nguồn** | File `.dta` chứa skip code (`9999998/9999999`), nhãn Hàn, mã categorical — không được tự ý sửa kẻo mất dấu vết gốc | `raw_tables` giữ nguyên, chỉ thêm cột provenance |
+| **Hài hòa tên biến qua wave** | Wave 1 đặt tên `w01{stem}`, wave 2–4 đặt `y0n...`; workbook lại viết hoa/khác case → **không thể suy tên biến từ tên cột** | Lớp metadata dựng `variable_catalog` làm "từ điển" chính thức |
+| **Tách quyết định làm sạch ra khỏi đọc dữ liệu** | Mask skip code, decode nhãn, phái sinh feature là các *quyết định phân tích*, phải tách khỏi việc đọc thô để có thể kiểm chứng | `processed` mới là nơi ra quyết định làm sạch |
+
 ### 4.1. Vì sao tách lớp?
 
 **Lý do cốt lõi: các "mã bỏ qua" (skip codes) chỉ được làm sạch ở lớp processed.** Dữ
@@ -145,6 +154,33 @@ thật**, mọi trung bình và phương sai sẽ bị **bóp méo nghiêm trọ
 > xử lý). Ngoại lệ duy nhất là Mục 7 (wrangling) — nơi *cố tình* quay về raw để phô bày
 > quy trình biến đổi.
 
+### 4.1b. Hai nguyên tắc xương sống: *metadata-first* và *ghi-nhận-không-tự-sửa*
+
+Ngoài việc tách lớp, pipeline tuân theo hai nguyên tắc chi phối **vì sao các bước được sắp
+như thế**:
+
+**(1) Metadata-first — dựng "từ điển biến" trước khi đụng một dòng dữ liệu nào.** Bước đầu
+tiên (`build-metadata`) *không* đọc dữ liệu, mà chỉ đọc **metadata** (label, value-label,
+codebook, mapping) để dựng `variable_catalog`. Lý do bắt buộc: YP2021 đổi quy ước đặt tên
+giữa các wave và workbook dùng case khác tên cột thực. Nếu nhảy thẳng vào xử lý dữ liệu,
+ta sẽ **map sai biến qua wave** (đây đúng là lỗi từng xảy ra — xem commit *"fix lỗi chuyển
+từ data raw sang interim... bị map sai nhãn"*). Có catalog làm chuẩn trước, mọi bước sau
+mới tham chiếu được tên biến một cách tin cậy. Mỗi biến còn được chấm
+`metadata_confidence` (`confirmed`/`partial`/`conflict`/`unknown`) để biết chỗ nào chắc,
+chỗ nào cần thận trọng.
+
+**(2) Ghi nhận vấn đề, không âm thầm tự sửa.** Mọi bước đều mang theo một `AuditLog`. Khi
+gặp lệch số dòng/cột, `sampid` null, hay metadata mâu thuẫn (vd label `.dta` có hậu tố
+wave `(1차년도)` còn codebook giữ mô tả gốc → đánh dấu `conflict`), pipeline **log lại
+vào bảng `*_issues` thay vì tự đoán và sửa**. Triết lý: một quyết định làm sạch sai mà bị
+giấu đi còn nguy hiểm hơn một vấn đề được phơi bày. Nhờ vậy mỗi con số ở báo cáo đều
+**truy ngược được** về bước sinh ra nó.
+
+> **Hệ quả về thứ tự chạy:** các bước **phụ thuộc nhau theo chuỗi** — mỗi lệnh đọc output
+> trên đĩa của lệnh trước và sẽ báo lỗi `Run ... first` nếu thiếu. Đây là thiết kế
+> *idempotent*: chạy lại một bước cho ra cùng kết quả, và có thể chạy lại riêng một bước
+> mà không phải làm lại từ đầu.
+
 ### 4.2. Các lệnh pipeline (chạy theo đúng thứ tự)
 
 ```bash
@@ -156,6 +192,23 @@ python -m src.data.youth_panel.pipeline build-construct-candidates # ứng viên
 python -m src.data.youth_panel.pipeline build-target-sample        # mẫu pilot 5.687
 python -m src.data.youth_panel.pipeline build-processed-pilot      # bảng processed 47 cột
 ```
+
+Bảy bước không phải bảy việc rời rạc, mà là một **chuỗi phụ thuộc**: mỗi bước thêm đúng
+một biến đổi và là tiền đề cho bước sau. Vì sao cần từng bước, và vì sao đặt ở đúng vị trí:
+
+| Bước | Làm gì | Vì sao cần & vì sao ở vị trí này |
+|---|---|---|
+| **1. metadata** | Đọc metadata, dựng `variable_catalog` + chấm độ tin cậy | Phải có **trước tiên** vì mọi bước sau cần "từ điển biến" để tham chiếu đúng tên qua wave (tránh map sai nhãn) |
+| **2. raw-tables** | Materialize full `.dta` → parquet, **giữ nguyên** mã số, thêm cột provenance | Tạo bản sao trung thực để truy vết; phải sau metadata để validate số dòng/cột đối chiếu kỳ vọng |
+| **3. panel** | Dựng index mỏng `sampid + wave` (48.852 = 4×12.213), bool-hóa cờ tham gia | Biến cờ `참여여부` thành cột `participated` → đo **attrition** observed (nền cho funnel & P-A-S) |
+| **4. job-history** | Gộp bảng spell-grain (27.127 dòng) lên mức người: row→job→respondent | Đổi **độ chi tiết** để có đặc trưng cấp cá nhân (`total_jobs`, `job_changes`...); tách riêng vì grain khác hẳn panel |
+| **5. construct-candidates** | Liệt kê biến ứng viên theo nhóm cấu trúc (chỉ metadata) | Bước **review trên giấy** trước khi vật chất hóa feature — quyết định *giữ biến nào* trước khi tốn công xử lý |
+| **6. target-sample** | Xác minh metadata cho rule `w04==1 & w04edu>=3`, dựng funnel, định nghĩa `employed_w04` | Phải có **trước** processed vì processed cần biết *lọc ai* (5.687 người) và *target là gì* |
+| **7. processed-pilot** | Mask skip code, decode nhãn, phái sinh feature (vd GPA), link job-history → bảng 47 cột | Bước **cuối cùng** quy tụ mọi quyết định làm sạch; chỉ chạy được khi 6 bước trên đã xong |
+
+Điểm mấu chốt của thứ tự này: **metadata và scope được chốt trước, làm sạch và phái sinh
+feature làm sau cùng**. Nhờ vậy nếu cần đổi một quyết định làm sạch (vd cách điền khuyết),
+ta chỉ chạy lại bước 7 mà không đụng tới catalog hay sample đã xác minh.
 
 ### 4.3. Bảng processed trung tâm
 
@@ -180,6 +233,68 @@ tạo `graduation_gpa_yp100` bằng **quy tắc trung điểm (midpoint) riêng 
 
 > **Cảnh báo diễn giải:** không so sánh giá trị GPA này như điểm tuyệt đối với GOMS/KEEP
 > mà không nêu rõ thang nguồn và cách chuẩn hóa khác nhau.
+
+#### 4.4.1. Vì sao chọn quy tắc trung điểm — và logic của từng mốc
+
+Phải dùng **bảng quy tắc ánh xạ** chứ không thể "tính ra", vì biến gốc `y04a141` **không
+lưu con số GPA thực** (kiểu 3.7/4.5) mà chỉ lưu **mã nhóm hạng chữ** (A/B/C/D/F). Khi dữ
+liệu nguồn đã là **khoảng hạng (band)** chứ không phải số đo, không có cách nào ngoài việc
+**quy ước** một giá trị đại diện cho mỗi khoảng. Code thực hiện ở `processed.py`
+(`GPA_CATEGORY_TO_100`) và ghi rõ nguồn quy tắc tại hằng `GPA_RULE_SOURCE`.
+
+Với bốn hạng A/B/C/D, mỗi hạng tương ứng một **dải phần trăm rộng ~10 điểm** trong hệ Hàn
+Quốc (A≈90–100, B≈80–89, C≈70–79, D≈60–69). Khi chỉ biết *khoảng* mà không biết vị trí
+thực bên trong, **điểm giữa (midpoint)** là giá trị đại diện ít thiên lệch nhất — nó là kỳ
+vọng hợp lý nhất → A=95, B=85, C=75, D=65. Chọn **thang 100** (thay vì 4.5/4.3) để trung
+tính và dễ diễn giải, đồng thời tránh ngộ nhận là so sánh được trực tiếp với GPA gốc của
+GOMS/KEEP.
+
+#### 4.4.2. Biện luận cho mốc F = 50 (giá trị mang tính tùy ý)
+
+Khác bốn hạng còn lại, **F không có dải dưới xác định**: điểm trượt có thể nằm bất kỳ đâu
+từ 0 đến 59. Nếu áp máy móc quy tắc trung điểm cho khoảng "0–59" thì F ≈ 30 — nhưng con số
+này tạo một **outlier cực đoan**, kéo giãn phương sai và bóp méo phân phối, đồng thời làm
+bất ổn hệ số hồi quy. Vì vậy nhóm **chủ động chọn F = 50** thay vì để công thức midpoint
+quyết định. Năm lập luận bảo vệ lựa chọn này:
+
+1. **Bảo toàn thứ bậc (ordinal) và khoảng cách hợp lý.** Điều thực sự quan trọng với mô
+   hình là *trật tự* F < D < C < B < A được giữ đúng và **giãn cách tương đối đều**. Chuỗi
+   50 < 65 < 75 < 85 < 95 thỏa cả hai: đơn điệu tăng, và bước nhảy giữa các hạng không
+   chênh lệch bất thường. F = 50 đặt F **thấp hơn D đúng 15 điểm** — cùng bậc giãn cách
+   với các cặp hạng kề khác — thay vì tạo một hố sâu phi lý.
+
+2. **Tránh outlier hơn là truy đuổi "độ chính xác" giả.** Một giá trị F = 0 hay F = 30 trông
+   "đúng theo công thức" hơn, nhưng vì hạng chữ vốn đã **mất hết độ phân giải bên trong
+   khoảng**, mọi con số đều chỉ là quy ước. Giữa hai cái quy ước, ta chọn cái **ít gây hại
+   cho phân phối** hơn. F = 50 không nói "người trượt đạt 50% kiến thức"; nó chỉ là **mã
+   thứ bậc thấp nhất** đặt ở khoảng cách an toàn.
+
+3. **Ảnh hưởng thực tế gần như bằng không — vì hai lý do cộng hưởng.** (a) F **cực hiếm**
+   trong mẫu: đối tượng phân tích là người đã *tốt nghiệp CĐ/ĐH* (`w04edu >= 3`), nên gần
+   như không ai mang hạng tốt nghiệp F. (b) Bản thân GPA **không đạt ý nghĩa thống kê**
+   (p = 0,060, xem [Mục 6.11](#611-bảng-kiểm-định-thống-kê-welch-t-test--chi-square)) và
+   trong mô hình logistic nó hành xử gần như **biến thứ bậc** chứ không phải biến liên tục
+   thật. Một giá trị hiếm, gắn vào một biến vốn yếu, thì việc đặt nó ở 50 hay 40 hay 0
+   **không thể dịch chuyển kết luận**.
+
+4. **Kiểm chứng được bằng phân tích độ nhạy (sensitivity).** Chính vì điểm 1–3, mệnh đề
+   "kết luận không phụ thuộc lựa chọn F" là **kiểm tra được**, không phải niềm tin: chạy
+   lại pipeline với F ∈ {0; 40; 50} và đối chiếu hệ số/ROC-AUC sẽ cho kết quả gần như
+   trùng. Đây là tuyến phòng thủ chuẩn cho mọi tham số quy ước — biến một lựa chọn tùy ý
+   thành một lựa chọn **đã được chứng minh là không trọng yếu**.
+
+5. **Trung thực và phơi bày, không giấu.** Quy tắc được **ghi thành tài liệu** trong code
+   (`GPA_RULE_SOURCE`) và `README`, và được liệt kê thẳng vào **chệch đo lường
+   (measurement bias)** ở [Mục 5.5](#55-năm-loại-chệch--sai-số-trong-yp2021). Một giả định
+   được nêu rõ và đánh dấu rủi ro thì an toàn hơn nhiều một giả định bị che đi — đúng tinh
+   thần "ghi nhận vấn đề, không âm thầm tự sửa" của toàn pipeline ([Mục 4.1b](#41b-hai-nguyên-tắc-xương-sống-metadata-first-và-ghi-nhận-không-tự-sửa)).
+
+> **Chốt lại để bảo vệ trước hội đồng:** các con số 95/85/75/65/50 là **giả định của nhóm**,
+> không phải dữ liệu YP cung cấp. Điểm yếu lộ rõ nhất là F = 50 mang tính tùy ý — nhưng nó
+> được chọn có chủ đích để *bảo toàn thứ bậc và tránh outlier*, tác động tới kết luận là
+> **không đáng kể** (F cực hiếm + GPA vốn không có ý nghĩa thống kê), và mệnh đề đó
+> **kiểm chứng được** bằng phân tích độ nhạy. Đây là cách xử lý một tham số quy ước một
+> cách có kỷ luật, không phải một lỗ hổng bị bỏ qua.
 
 ---
 
@@ -237,6 +352,26 @@ sau tốt nghiệp". Bộ lọc học vấn **thu khung chọn mẫu A (rộng) 
 bước này tạo selection funnel và là nguồn của **chệch bao phủ**.
 
 Funnel rút gọn: 12.213 (khung) → 9.665 (`w04==1`) → **5.687** (`w04==1 and w04edu>=3`).
+
+**Vì sao riêng điều kiện `w04 == 1`?** Đây là đặc thù của dữ liệu **panel**: trong file
+Stata gốc `yp2021_w04.dta`, **mọi wave đều giữ nguyên đủ 12.213 dòng** — toàn bộ khung
+panel. Một người rời khảo sát ở wave 4 **không bị xoá dòng**; dòng của họ vẫn còn, chỉ là
+câu trả lời wave-4 bị bỏ trống. KEIS phân biệt "ai thực sự trả lời wave 4" bằng **biến cờ
+tham gia** `w04` (nhãn `참여여부`), chứ không bằng sự hiện diện của dòng. Do đó `w04 == 1`
+chính là bộ lọc *"chỉ giữ người thật sự có dữ liệu wave 4"*. Ba lý do bắt buộc:
+
+1. **Loại attrition.** Trong 12.213 dòng, chỉ **9.665** người thực sự tham gia (2.548
+   người đã rời panel). Không lọc thì kéo vào 2.548 dòng rỗng — đây chính là bước đầu của
+   selection funnel và là biểu hiện trực tiếp của **chệch không phản hồi (attrition)**,
+   rủi ro chệch quan trọng nhất của dự án (người rời panel có thể khác biệt hệ thống).
+2. **Target chỉ tồn tại khi người đó trả lời.** Biến mục tiêu `employed_w04` lấy từ
+   `w04ecoact` (hoạt động kinh tế wave 4). Người `w04 == 2` không trả lời câu này → giữ
+   họ lại sẽ tạo target khuyết hàng loạt, làm hỏng cả nhãn lẫn tỷ lệ có việc 75,6%.
+3. **Đúng mốc thời gian.** Cả dự án dự đoán tình trạng việc làm *tại wave 4*; chỉ người
+   hiện diện ở wave 4 mới cung cấp quan sát hợp lệ cho mốc này (xem [Mục 5.1b](#51b)).
+
+Nói gọn, hai điều kiện chia vai rõ ràng: `w04 == 1` đảm bảo **"có dữ liệu để phân tích"**
+(loại attrition), còn `w04edu >= 3` đảm bảo **"đúng đối tượng cần phân tích"** (thu A về P).
 
 ### 5.3. Selection funnel (phễu chọn mẫu)
 

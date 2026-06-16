@@ -194,6 +194,23 @@ nền tảng của mọi suy luận thống kê.
 - **Thời gian**: giai đoạn 2017–2024, với độ trễ panel bốn đợt khảo sát.
 - **Lĩnh vực**: quá trình chuyển tiếp từ giáo dục sang việc làm.
 
+### 5.1b. Vì sao chọn wave 4 làm mốc phân tích?
+
+YP2021 là **panel 4 đợt** (wave 1→4, 2021→2024) theo dõi *cùng một nhóm người* qua thời
+gian. Việc chọn wave 4 (đợt mới nhất, năm 2024) không tùy tiện mà có ba lý do:
+
+1. **Phản ánh tình trạng gần hiện tại nhất.** Wave 4 cho biết tình trạng việc làm cập
+   nhật nhất của nhóm thanh niên, thay vì một thời điểm đã cũ.
+2. **Phù hợp scope "sau tốt nghiệp".** Panel tuyển thanh niên 19–28 tuổi tại wave 1 — lúc
+   đó nhiều người **còn đang đi học**, chưa thể hỏi "có việc sau tốt nghiệp" một cách có
+   ý nghĩa. Sau 4 năm (đến wave 4), phần lớn đã **hoàn tất giáo dục và bước vào thị trường
+   lao động** → câu hỏi nghiên cứu mới có cơ sở.
+3. **Đủ độ trễ để quan sát chuyển tiếp.** Mục tiêu là *chuyển tiếp giáo dục → việc làm*;
+   wave 4 cho khoảng thời gian dài nhất để quá trình này diễn ra.
+
+> **Cái giá phải trả:** wave 4 chịu **attrition** nặng nhất — chỉ còn 9.665/12.213 người
+> (~79%). Đây chính là lý do báo cáo nhấn mạnh rủi ro chệch không phản hồi (xem Mục 6.2).
+
 ### 5.2. Bộ ba Quần thể – Khung chọn mẫu – Mẫu (P-A-S)
 
 | Thành phần | YP2021 cụ thể hóa |
@@ -207,9 +224,19 @@ nền tảng của mọi suy luận thống kê.
 chung, bao gồm người chưa đạt ngưỡng cao đẳng/đại học, nên buộc phải **lọc theo học vấn**
 để thu khung A về đúng P. Chính bước lọc này tạo ra **selection funnel**.
 
-Bằng chứng metadata cho quy tắc lọc:
-- `w04`: `1 = 참여` (tham gia), `2 = 미참여`.
-- `w04edu`: `3 = 전문대졸` (CĐ), `4 = 대졸` (ĐH), `5 = 석사학위이상` (Thạc sĩ trở lên).
+**Giải mã quy tắc lọc `w04 == 1 and w04edu >= 3`** — hai điều kiện nối bằng AND:
+
+| Điều kiện | Biến | Ý nghĩa | Nhãn gốc (Hàn) |
+|---|---|---|---|
+| `w04 == 1` | Cờ tham gia wave 4 | **Có tham gia** đợt khảo sát 4 (loại người vắng → không có dữ liệu) | `1=참여`, `2=미참여` |
+| `w04edu >= 3` | Học vấn cao nhất ở wave 4 | **Tốt nghiệp CĐ trở lên** (loại người chưa đạt ngưỡng) | `3=전문대졸`(CĐ), `4=대졸`(ĐH), `5=석사학위이상`(Thạc sĩ+) |
+
+**Vì sao cần điều kiện thứ hai (`w04edu >= 3`)?** Vì YP2021 *không phải graduate-only* —
+panel tuyển cả thanh niên nói chung. Quần thể mục tiêu (P) lại là "người tốt nghiệp CĐ/ĐH
+sau tốt nghiệp". Bộ lọc học vấn **thu khung chọn mẫu A (rộng) về đúng quần thể P**. Chính
+bước này tạo selection funnel và là nguồn của **chệch bao phủ**.
+
+Funnel rút gọn: 12.213 (khung) → 9.665 (`w04==1`) → **5.687** (`w04==1 and w04edu>=3`).
 
 ### 5.3. Selection funnel (phễu chọn mẫu)
 
@@ -569,6 +596,31 @@ nét đứt = trung bình chung 75,6%.
 - **Vì sao chọn cả hai:** ROC đánh giá năng lực phân tách ở mọi ngưỡng; **PR phù hợp hơn
   khi lớp lệch** vì tập trung vào lớp dương. Dùng cả hai cho cái nhìn cân bằng trên mẫu
   mất cân bằng.
+
+#### ROC và AUC — tác dụng cụ thể
+
+Đây là cặp công cụ đo **năng lực phân biệt (discrimination)** của mô hình — đặc biệt then
+chốt với dự án này vì mẫu mất cân bằng (75,6% có việc).
+
+**ROC (Receiver Operating Characteristic) — đường cong:**
+- Vẽ quan hệ **TPR (tỷ lệ dương đúng)** theo **FPR (tỷ lệ dương sai)** khi quét **mọi
+  ngưỡng quyết định** từ 0 đến 1, thay vì cố định ở 0,5.
+- Đường chéo = mô hình ngẫu nhiên (vô dụng); đường càng *cong lên góc trái-trên* càng tốt.
+- Tác dụng: cho thấy model phân biệt "có việc" vs "không việc" tốt đến đâu *độc lập với
+  ngưỡng* — quan trọng vì ngưỡng tối ưu có thể khác 0,5 (xem threshold tuning, Mục 6.19).
+
+**AUC (Area Under Curve) — diện tích dưới đường ROC:**
+- Tóm tắt cả đường ROC thành **một con số** trong [0,5; 1].
+- **Diễn giải xác suất:** AUC = xác suất model xếp một người *có việc* (ngẫu nhiên) cao
+  hơn một người *không việc* (ngẫu nhiên). **0,5 = ngẫu nhiên · 1,0 = hoàn hảo.**
+- Trong dự án: ROC-AUC ≈ **0,68**; bootstrap CI ≈ [0,64; 0,71] *không chứa 0,5* → tín
+  hiệu là **thật** dù khiêm tốn.
+
+**Tại sao ROC/AUC, không chỉ accuracy?** Đây là lý do mấu chốt: baseline luôn đoán "có
+việc" đã đạt **accuracy 75,6%** nhưng **không nhận diện được một ai thất nghiệp** — và có
+**ROC-AUC = 0,50** (đúng bằng ngẫu nhiên). Accuracy bị mẫu lệch "thổi phồng"; ROC-AUC thì
+trung thực, cho thấy logistic (0,68) *thực sự học được tín hiệu* vượt baseline (0,50) —
+điều accuracy không phân biệt nổi.
 
 ---
 
